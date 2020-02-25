@@ -8,4 +8,12 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Build
-        run: cargo build --verbose
+        run: |
+          cargo build --verbose
+          pwd
+          ls target/release
+      # - name: Upload artifact
+      #   uses: actions/upload-artifact@v1.0.0
+      #   with:
+      #     name: ${{ matrix.platform }}-tower-installer
+      #     path:
