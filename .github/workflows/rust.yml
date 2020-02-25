@@ -12,11 +12,18 @@ jobs:
     runs-on: ${{ matrix.platform.name }}
     steps:
       - uses: actions/checkout@v2
+      - name: Install latest nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
       - name: Build
-        run: |
-          RUSTFLAGS="-Ctarget-feature=+crt-static" cargo build --release
-          pwd
-          ls target/release
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release
+        env:
+          RUSTFLAGS: "-Ctarget-feature=+crt-static -Zunstable-options"
       - name: Upload artifact
         uses: actions/upload-artifact@v1.0.0
         with:
