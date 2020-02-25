@@ -3,8 +3,13 @@ jobs:
   build:
     strategy:
       matrix:
-        platform: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.platform }}
+        platform:
+          [
+            { "name": "ubuntu-latest", "binary": "installer" },
+            { "name": "macos-latest", "binary": "installer" },
+            { "name": "windows-latest", "binary": "installer.exe" },
+          ]
+    runs-on: ${{ matrix.platform.name }}
     steps:
       - uses: actions/checkout@v2
       - name: Build
@@ -12,8 +17,8 @@ jobs:
           cargo build --verbose
           pwd
           ls target/release
-      # - name: Upload artifact
-      #   uses: actions/upload-artifact@v1.0.0
-      #   with:
-      #     name: ${{ matrix.platform }}-tower-installer
-      #     path:
+      - name: Upload artifact
+        uses: actions/upload-artifact@v1.0.0
+        with:
+          name: ${{ matrix.platform }}-tower-${{ matrix.platform.binary }}
+          path: target/release/${{ matrix.platform.binary }}
