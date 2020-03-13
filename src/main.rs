@@ -225,78 +225,28 @@ fn check_docker() {
 }
 
 fn start_from_source(source_dir: &PathBuf, force: &bool) {
-    let docker_compose_arg = "docker-compose -p tower -f - up -d";
-    let mut child = if cfg!(target_os = "windows") {
+    let docker_compose_file = source_dir
+        .join("packages/server/docker-compose.yml")
+        .to_str()
+        .expect("failed to get docker-compose.yml")
+        .to_owned();
+    let docker_compose_arg = format!("docker-compose -p tower -f {} up -d", &docker_compose_file);
+    let containers_command = if cfg!(target_os = "windows") {
         Command::new("cmd")
             .args(&["/C", &docker_compose_arg])
-            .spawn()
-            .expect("failed to start tower containers")
+            .status()
     } else {
         Command::new("sh")
             .arg("-c")
             .arg(&docker_compose_arg)
-            .spawn()
-            .expect("failed to start tower containers")
+            .status()
     };
+    if !containers_command
+        .expect("failed to start tower containers")
+        .success()
     {
-        let child_stdin = child.stdin.as_mut().unwrap();
-        child_stdin
-            .write_all(
-                b"
-version: '3'
-services:
-    prisma:
-    image: prismagraphql/prisma:1.34
-    restart: always
-    depends_on:
-        - 'postgres'
-    ports:
-        - '8811:8811'
-    environment:
-        PRISMA_CONFIG: |
-        port: 8811
-        databases:
-            default:
-            connector: postgres
-            host: postgres
-            port: 5432
-            user: prisma
-            password: prisma
-            rawAccess: true
-    postgres:
-    image: postgres:10.3
-    restart: always
-    environment:
-        POSTGRES_USER: prisma
-        POSTGRES_PASSWORD: prisma
-    volumes:
-        - postgres:/var/lib/postgresql/data
-    openresty:
-    image: openresty/openresty:alpine
-    restart: always
-    ports:
-        - '80:80'
-    environment:
-        - NGINX_PORT=80
-    volumes:
-        - ../server/config/nginx:/etc/nginx/conf.d
-        - ../ui/build:/www/tower
-    server:
-    image: tower:0.2.3
-    restart: always
-    depends_on:
-        - 'prisma'
-    ports:
-        - '8800:8800'
-volumes:
-    postgres: ~",
-            )
-            .unwrap();
-    }
-    if !child.wait().unwrap().success() {
         panic!("failed to start tower containers")
     }
-
     let source_dir_str = source_dir.to_str().unwrap();
     let yarn_arg = format!(
         "cd {} && yarn && yarn lerna run prepublish",
@@ -406,24 +356,79 @@ fn load_images(tar_dir: &PathBuf) {
 }
 
 fn start_from_image() {
-    let docker_compose_file = env::current_dir()
-        .expect("failed to get current directory")
-        .join("docker-compose.yml")
-        .to_str()
-        .expect("failed to get docker-compose.yml")
-        .to_owned();
-    let docker_compose_arg = format!("docker-compose -p tower -f {} up -d", &docker_compose_file);
-    let containers_command = if cfg!(target_os = "windows") {
+    let docker_compose_arg = "docker-compose -p tower -f - up -d";
+    let mut child = if cfg!(target_os = "windows") {
         Command::new("cmd")
             .args(&["/C", &docker_compose_arg])
-            .status()
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("failed to start tower containers")
     } else {
         Command::new("sh")
             .arg("-c")
             .arg(&docker_compose_arg)
-            .status()
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("failed to start tower containers")
     };
-    if !containers_command
+    {
+        let child_stdin = child.stdin.as_mut().expect("failed to get stdin handler");
+        child_stdin
+            .write_all(
+                b"
+version: '3'
+services:
+  prisma:
+    image: prismagraphql/prisma:1.34
+    restart: always
+    depends_on:
+      - 'postgres'
+    ports:
+      - '8811:8811'
+    environment:
+      PRISMA_CONFIG: |
+        port: 8811
+        databases:
+          default:
+            connector: postgres
+            host: postgres
+            port: 5432
+            user: prisma
+            password: prisma
+            rawAccess: true
+  postgres:
+    image: postgres:10.3
+    restart: always
+    environment:
+      POSTGRES_USER: prisma
+      POSTGRES_PASSWORD: prisma
+    volumes:
+      - postgres:/var/lib/postgresql/data
+  openresty:
+    image: openresty/openresty:alpine
+    restart: always
+    ports:
+      - '80:80'
+    environment:
+      - NGINX_PORT=80
+    volumes:
+      - ../server/config/nginx:/etc/nginx/conf.d
+      - ../ui/build:/www/tower
+  server:
+    image: tower:0.2.3
+    restart: always
+    depends_on:
+      - 'prisma'
+    ports:
+      - '8800:8800'
+volumes:
+  postgres: ~
+",
+            )
+            .expect("failed to start tower containers");
+    }
+    if !child
+        .wait()
         .expect("failed to start tower containers")
         .success()
     {
