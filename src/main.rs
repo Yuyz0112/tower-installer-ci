@@ -5,6 +5,8 @@ use byte_unit::{Byte, ByteUnit};
 use clap::{App, Arg, SubCommand};
 use prettytable::{color, Attr, Cell, Row, Table};
 use std::env;
+use std::io::Write;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use sysinfo::{DiskExt, SystemExt};
@@ -13,6 +15,7 @@ struct HardwareRequirement {
     cpu_cores: u8,
     memory: Byte,
     storage_space: Byte,
+    ports: Vec<u16>,
 }
 
 fn get_color(actual: u64, required: u64, expected: u64) -> color::Color {
@@ -25,16 +28,26 @@ fn get_color(actual: u64, required: u64, expected: u64) -> color::Color {
     return color::GREEN;
 }
 
-fn check_hardware_requirement() {
+fn is_port_available(port: &u16) -> bool {
+    match TcpListener::bind(("127.0.0.1", *port)) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+fn check_hardware_requirement(force: &bool) {
     let required_requirement = HardwareRequirement {
         cpu_cores: 2,
         memory: Byte::from_unit(4.0, ByteUnit::GiB).unwrap(),
         storage_space: Byte::from_unit(40.0, ByteUnit::GiB).unwrap(),
+        // TODO: check 80 8800
+        ports: vec![8811],
     };
     let expeceted_requirement = HardwareRequirement {
         cpu_cores: 4,
         memory: Byte::from_unit(8.0, ByteUnit::GiB).unwrap(),
         storage_space: Byte::from_unit(100.0, ByteUnit::GiB).unwrap(),
+        ports: vec![],
     };
 
     let mut system = sysinfo::System::new_all();
@@ -114,7 +127,44 @@ fn check_hardware_requirement() {
         .with_style(Attr::Bold),
     ]));
 
+    let unavailable_ports = &required_requirement
+        .ports
+        .clone()
+        .into_iter()
+        .filter(|p| !is_port_available(p))
+        .collect::<Vec<u16>>();
+    let port_result_cell = if unavailable_ports.len() == 0 {
+        Cell::new("Ok").with_style(Attr::ForegroundColor(color::GREEN))
+    } else {
+        Cell::new(
+            &unavailable_ports
+                .clone()
+                .into_iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<String>>()
+                .join(", "),
+        )
+        .with_style(Attr::ForegroundColor(color::RED))
+    };
+    table.add_row(Row::new(vec![
+        Cell::new("ports"),
+        Cell::new(
+            &required_requirement
+                .ports
+                .into_iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<String>>()
+                .join(", "),
+        ),
+        Cell::new("-"),
+        port_result_cell.with_style(Attr::Bold),
+    ]));
+
     table.printstd();
+
+    if *force {
+        return;
+    }
 
     if actual_cpu_cores < required_requirement.cpu_cores {
         panic!("CPU cores not enough.");
@@ -124,6 +174,9 @@ fn check_hardware_requirement() {
     }
     if remained_storage_space < required_requirement.storage_space {
         panic!("Storage space not enough.");
+    }
+    if unavailable_ports.len() > 0 {
+        panic!("Some ports are not available.");
     }
 }
 
@@ -171,27 +224,76 @@ fn check_docker() {
     }
 }
 
-fn start_from_source(source_dir: &PathBuf, force: bool) {
-    let docker_compose_file = source_dir
-        .join("packages/server/docker-compose.yml")
-        .to_str()
-        .expect("failed to get docker-compose.yml")
-        .to_owned();
-    let docker_compose_arg = format!("docker-compose -p tower -f {} up -d", &docker_compose_file);
-    let containers_command = if cfg!(target_os = "windows") {
+fn start_from_source(source_dir: &PathBuf, force: &bool) {
+    let docker_compose_arg = "docker-compose -p tower -f - up -d";
+    let mut child = if cfg!(target_os = "windows") {
         Command::new("cmd")
             .args(&["/C", &docker_compose_arg])
-            .status()
+            .spawn()
+            .expect("failed to start tower containers")
     } else {
         Command::new("sh")
             .arg("-c")
             .arg(&docker_compose_arg)
-            .status()
+            .spawn()
+            .expect("failed to start tower containers")
     };
-    if !containers_command
-        .expect("failed to start tower containers")
-        .success()
     {
+        let child_stdin = child.stdin.as_mut().unwrap();
+        child_stdin
+            .write_all(
+                b"
+version: '3'
+services:
+    prisma:
+    image: prismagraphql/prisma:1.34
+    restart: always
+    depends_on:
+        - 'postgres'
+    ports:
+        - '8811:8811'
+    environment:
+        PRISMA_CONFIG: |
+        port: 8811
+        databases:
+            default:
+            connector: postgres
+            host: postgres
+            port: 5432
+            user: prisma
+            password: prisma
+            rawAccess: true
+    postgres:
+    image: postgres:10.3
+    restart: always
+    environment:
+        POSTGRES_USER: prisma
+        POSTGRES_PASSWORD: prisma
+    volumes:
+        - postgres:/var/lib/postgresql/data
+    openresty:
+    image: openresty/openresty:alpine
+    restart: always
+    ports:
+        - '80:80'
+    environment:
+        - NGINX_PORT=80
+    volumes:
+        - ../server/config/nginx:/etc/nginx/conf.d
+        - ../ui/build:/www/tower
+    server:
+    image: tower:0.2.3
+    restart: always
+    depends_on:
+        - 'prisma'
+    ports:
+        - '8800:8800'
+volumes:
+    postgres: ~",
+            )
+            .unwrap();
+    }
+    if !child.wait().unwrap().success() {
         panic!("failed to start tower containers")
     }
 
@@ -219,7 +321,11 @@ fn start_from_source(source_dir: &PathBuf, force: bool) {
         .to_str()
         .expect("failed to get setup.js")
         .to_owned();
-    let reset_arg = if force { "&& yarn prisma reset -f" } else { "" };
+    let reset_arg = if *force {
+        "&& yarn prisma reset -f"
+    } else {
+        ""
+    };
     let setup_args = &[
         // cd to server dir
         "cd",
@@ -251,31 +357,159 @@ fn start_from_source(source_dir: &PathBuf, force: bool) {
     }
 }
 
+fn check_images() -> bool {
+    let images = [
+        "tower:0.2.3",
+        "prismagraphql/prisma:1.34",
+        "postgres:10.3",
+        "openresty/openresty:alpine",
+    ];
+    for image in images.iter() {
+        let command = format!("docker inspect --type=image {}", &image);
+        let status = if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .args(&["/C", &command])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        } else {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&command)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        };
+        let image_exists = match status {
+            Ok(s) => s.success(),
+            Err(_) => false,
+        };
+        if !image_exists {
+            println!("{} image is missing", &image);
+            return false;
+        }
+    }
+    println!("all image exists");
+    true
+}
+
+fn load_images(tar_dir: &PathBuf) {
+    let docker_arg = format!("docker load --input {}", tar_dir.to_str().unwrap());
+    let command = if cfg!(target_os = "windows") {
+        Command::new("cmd").args(&["/C", &docker_arg]).status()
+    } else {
+        Command::new("sh").arg("-c").arg(&docker_arg).status()
+    };
+    if !command.expect("failed to load docker images").success() {
+        panic!("failed to load docker images")
+    }
+}
+
+fn start_from_image() {
+    let docker_compose_file = env::current_dir()
+        .expect("failed to get current directory")
+        .join("docker-compose.yml")
+        .to_str()
+        .expect("failed to get docker-compose.yml")
+        .to_owned();
+    let docker_compose_arg = format!("docker-compose -p tower -f {} up -d", &docker_compose_file);
+    let containers_command = if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(&["/C", &docker_compose_arg])
+            .status()
+    } else {
+        Command::new("sh")
+            .arg("-c")
+            .arg(&docker_compose_arg)
+            .status()
+    };
+    if !containers_command
+        .expect("failed to start tower containers")
+        .success()
+    {
+        panic!("failed to start tower containers")
+    }
+}
+
+fn shut_down() {
+    let docker_compose_arg = "docker-compose -p tower down";
+    let containers_command = if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(&["/C", &docker_compose_arg])
+            .status()
+    } else {
+        Command::new("sh")
+            .arg("-c")
+            .arg(&docker_compose_arg)
+            .status()
+    };
+    if !containers_command
+        .expect("failed to shut down tower containers")
+        .success()
+    {
+        panic!("failed to shut down tower containers")
+    }
+}
+
 fn main() {
     let matches = App::new("Tower Installer")
         .version("0.1.0")
-        .subcommand(SubCommand::with_name("deploy").arg(Arg::with_name("source_dir").long("from-source").help(
-            "Install tower from source code, please provide the directory of tower source code.",
-        ).takes_value(true))
-        .arg(Arg::with_name("force").long("force").help("Reset data and force deploy a new tower service")))
+        .subcommand(SubCommand::with_name("down").about("Shut down tower serivce."))
+        .subcommand(
+            SubCommand::with_name("deploy").about("Deploy tower service")
+                .arg(
+                    Arg::with_name("source_dir")
+                        .long("from-source")
+                        .help("Install tower from source code, please provide the directory of tower source code.")
+                        .takes_value(true)
+                    )
+                .arg(
+                    Arg::with_name("tar_dir")
+                        .long("from-tar")
+                        .help("Load tower images from target directory.")
+                        .takes_value(true)
+                )
+                .arg(Arg::with_name("force").long("force").help("Reset data and force deploy a new tower service")
+            )
+        )
         .get_matches();
 
     match matches.subcommand() {
         ("deploy", Some(sub_matches)) => {
+            let force = &sub_matches.is_present("force");
             println!("> checking hardware requirements...");
-            check_hardware_requirement();
+            check_hardware_requirement(force);
             println!("> checking docker and docker-compose...");
             check_docker();
+            check_images();
             println!("> starting tower containers...");
-            let mut source_dir = PathBuf::from(sub_matches.value_of("source_dir").expect("Currently we only support install from source code, please provide the --from-source flag."));
-            if !source_dir.is_absolute() {
-                source_dir = env::current_dir()
-                    .expect("failed to get current directory")
-                    .join(source_dir)
-                    .canonicalize()
-                    .expect("failed to canoicalize source directory");
+            if let Some(source_dir_value) = sub_matches.value_of("source_dir") {
+                let mut source_dir = PathBuf::from(source_dir_value);
+                if !source_dir.is_absolute() {
+                    source_dir = env::current_dir()
+                        .expect("failed to get current directory")
+                        .join(source_dir)
+                        .canonicalize()
+                        .expect("failed to canoicalize source directory");
+                }
+                start_from_source(&source_dir, force);
+                return;
             }
-            start_from_source(&source_dir, sub_matches.is_present("force"));
+            if let Some(tar_dir_value) = sub_matches.value_of("tar_dir") {
+                let mut tar_dir = PathBuf::from(tar_dir_value);
+                if !tar_dir.is_absolute() {
+                    tar_dir = env::current_dir()
+                        .expect("failed to get current directory")
+                        .join(tar_dir)
+                        .canonicalize()
+                        .expect("failed to canoicalize source directory");
+                    load_images(&tar_dir)
+                }
+            }
+            start_from_image()
+        }
+        ("down", Some(_)) => {
+            shut_down();
         }
         _ => {}
     };

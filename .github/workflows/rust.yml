@@ -6,7 +6,6 @@ jobs:
         platform:
           [
             { "name": "ubuntu-latest", "binary": "installer" },
-            { "name": "alpine-latest", "binary": "installer" },
             { "name": "macos-latest", "binary": "installer" },
             { "name": "windows-latest", "binary": "installer.exe" },
           ]
